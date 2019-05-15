@@ -1,7 +1,7 @@
 /*
  * acl.c - Manage the ACL (Access Control List)
  *
- * Copyright (C) 2013 - 2018, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2019, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  *
@@ -33,6 +33,7 @@
 #endif
 
 #include "rule.h"
+#include "netutils.h"
 #include "utils.h"
 #include "cache.h"
 #include "acl.h"
@@ -164,6 +165,11 @@ trimwhitespace(char *str)
 int
 init_acl(const char *path)
 {
+    if (path == NULL)
+    {
+        return -1;
+    }
+
     // initialize ipset
     ipset_init_library();
 
@@ -188,7 +194,8 @@ init_acl(const char *path)
         return -1;
     }
 
-    char buf[257];
+    char buf[MAX_HOSTNAME_LEN];
+
     while (!feof(f))
         if (fgets(buf, 256, f)) {
             // Discards the whole line if longer than 255 characters
@@ -251,7 +258,7 @@ init_acl(const char *path)
                 continue;
             }
 
-            char host[257];
+            char host[MAX_HOSTNAME_LEN];
             int cidr;
             parse_addr_cidr(line, host, &cidr);
 

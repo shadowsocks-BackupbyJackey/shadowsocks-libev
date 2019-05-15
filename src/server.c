@@ -1,7 +1,7 @@
 /*
  * server.c - Provide shadowsocks service
  *
- * Copyright (C) 2013 - 2018, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2019, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  *
@@ -66,10 +66,6 @@
 #define EWOULDBLOCK EAGAIN
 #endif
 
-#ifndef BUF_SIZE
-#define BUF_SIZE 2048
-#endif
-
 #ifndef SSMAXCONN
 #define SSMAXCONN 1024
 #endif
@@ -113,14 +109,17 @@ static void resolv_free_cb(void *data);
 
 int verbose      = 0;
 int reuse_port   = 0;
-char *local_addr = NULL;
+
+int is_bind_local_addr = 0;
+struct sockaddr_storage local_addr_v4;
+struct sockaddr_storage local_addr_v6;
 
 static crypto_t *crypto;
 
 static int acl       = 0;
 static int mode      = TCP_ONLY;
 static int ipv6first = 0;
-static int fast_open = 0;
+       int fast_open = 0;
 static int no_delay  = 0;
 static int ret_val   = 0;
 
@@ -163,13 +162,13 @@ stat_update_cb(EV_P_ ev_timer *watcher, int revents)
     struct sockaddr_un svaddr, claddr;
     int sfd = -1;
     size_t msgLen;
-    char resp[BUF_SIZE];
+    char resp[SOCKET_BUF_SIZE];
 
     if (verbose) {
         LOGI("update traffic stat: tx: %" PRIu64 " rx: %" PRIu64 "", tx, rx);
     }
 
-    snprintf(resp, BUF_SIZE, "stat: {\"%s\":%" PRIu64 "}", remote_port, tx + rx);
+    snprintf(resp, SOCKET_BUF_SIZE, "stat: {\"%s\":%" PRIu64 "}", remote_port, tx + rx);
     msgLen = strlen(resp) + 1;
 
     ss_addr_t ip_addr = { .host = NULL, .port = NULL };
@@ -404,8 +403,8 @@ create_and_bind(const char *host, const char *port, int mptcp)
         }
 
         if (rp->ai_family == AF_INET6) {
-            int ipv6only = host ? 1 : 0;
-            setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6only, sizeof(ipv6only));
+            int opt = host ? 1 : 0;
+            setsockopt(listen_sock, IPPROTO_IPV6, IPV6_V6ONLY, &opt, sizeof(opt));
         }
 
         int opt = 1;
@@ -440,6 +439,7 @@ create_and_bind(const char *host, const char *port, int mptcp)
             break;
         } else {
             ERROR("bind");
+            FATAL("failed to bind address");
         }
 
         close(listen_sock);
@@ -499,12 +499,16 @@ connect_to_remote(EV_P_ struct addrinfo *res,
     if (setnonblocking(sockfd) == -1)
         ERROR("setnonblocking");
 
-    if (local_addr != NULL)
-        if (bind_to_address(sockfd, local_addr) == -1) {
-            ERROR("bind_to_address");
+    if (is_bind_local_addr)
+    {
+        struct sockaddr_storage *local_addr =
+            res->ai_family == AF_INET ? &local_addr_v4 : &local_addr_v6;
+        if (bind_to_addr(local_addr, sockfd) == -1) {
+            ERROR("bind_to_addr");
             close(sockfd);
             return NULL;
         }
+    }
 
 #ifdef SET_INTERFACE
     if (iface) {
@@ -727,7 +731,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
         ev_timer_again(EV_A_ & server->recv_ctx->watcher);
     }
 
-    ssize_t r = recv(server->fd, buf->data, BUF_SIZE, 0);
+    ssize_t r = recv(server->fd, buf->data, SOCKET_BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
@@ -753,7 +757,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
     tx      += r;
     buf->len = r;
 
-    int err = crypto->decrypt(buf, server->d_ctx, BUF_SIZE);
+    int err = crypto->decrypt(buf, server->d_ctx, SOCKET_BUF_SIZE);
 
     if (err == CRYPTO_ERROR) {
         report_addr(server->fd, MALICIOUS, "authentication error");
@@ -945,7 +949,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
 
                 // XXX: should handle buffer carefully
                 if (server->buf->len > 0) {
-                    brealloc(remote->buf, server->buf->len, BUF_SIZE);
+                    brealloc(remote->buf, server->buf->len, SOCKET_BUF_SIZE);
                     memcpy(remote->buf->data, server->buf->data + server->buf->idx,
                            server->buf->len);
                     remote->buf->len = server->buf->len;
@@ -965,7 +969,7 @@ server_recv_cb(EV_P_ ev_io *w, int revents)
             memset(query, 0, sizeof(query_t));
             query->server = server;
             server->query = query;
-            snprintf(query->hostname, 257, "%s", host);
+            snprintf(query->hostname, MAX_HOSTNAME_LEN, "%s", host);
 
             server->stage = STAGE_RESOLVE;
             resolv_start(host, port, resolv_cb, resolv_free_cb, query);
@@ -1109,7 +1113,7 @@ resolv_cb(struct sockaddr *addr, void *data)
 
             // XXX: should handle buffer carefully
             if (server->buf->len > 0) {
-                brealloc(remote->buf, server->buf->len, BUF_SIZE);
+                brealloc(remote->buf, server->buf->len, SOCKET_BUF_SIZE);
                 memcpy(remote->buf->data, server->buf->data + server->buf->idx,
                        server->buf->len);
                 remote->buf->len = server->buf->len;
@@ -1139,7 +1143,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
 
     ev_timer_again(EV_A_ & server->recv_ctx->watcher);
 
-    ssize_t r = recv(remote->fd, server->buf->data, BUF_SIZE, 0);
+    ssize_t r = recv(remote->fd, server->buf->data, SOCKET_BUF_SIZE, 0);
 
     if (r == 0) {
         // connection closed
@@ -1165,7 +1169,7 @@ remote_recv_cb(EV_P_ ev_io *w, int revents)
     rx += r;
 
     server->buf->len = r;
-    int err = crypto->encrypt(server->buf, server->e_ctx, BUF_SIZE);
+    int err = crypto->encrypt(server->buf, server->e_ctx, SOCKET_BUF_SIZE);
 
     if (err) {
         LOGE("invalid password or cipher");
@@ -1340,7 +1344,7 @@ new_remote(int fd)
     remote->recv_ctx = ss_malloc(sizeof(remote_ctx_t));
     remote->send_ctx = ss_malloc(sizeof(remote_ctx_t));
     remote->buf      = ss_malloc(sizeof(buffer_t));
-    balloc(remote->buf, BUF_SIZE);
+    balloc(remote->buf, SOCKET_BUF_SIZE);
     memset(remote->recv_ctx, 0, sizeof(remote_ctx_t));
     memset(remote->send_ctx, 0, sizeof(remote_ctx_t));
     remote->fd                  = fd;
@@ -1403,7 +1407,7 @@ new_server(int fd, listen_ctx_t *listener)
     server->buf      = ss_malloc(sizeof(buffer_t));
     memset(server->recv_ctx, 0, sizeof(server_ctx_t));
     memset(server->send_ctx, 0, sizeof(server_ctx_t));
-    balloc(server->buf, BUF_SIZE);
+    balloc(server->buf, SOCKET_BUF_SIZE);
     server->fd                  = fd;
     server->recv_ctx->server    = server;
     server->recv_ctx->connected = 0;
@@ -1415,8 +1419,8 @@ new_server(int fd, listen_ctx_t *listener)
     server->listen_ctx          = listener;
     server->remote              = NULL;
 
-    server->e_ctx = ss_align(sizeof(cipher_ctx_t));
-    server->d_ctx = ss_align(sizeof(cipher_ctx_t));
+    server->e_ctx = ss_malloc(sizeof(cipher_ctx_t));
+    server->d_ctx = ss_malloc(sizeof(cipher_ctx_t));
     crypto->ctx_init(crypto->cipher, server->e_ctx, 1);
     crypto->ctx_init(crypto->cipher, server->d_ctx, 0);
 
@@ -1606,13 +1610,14 @@ main(int argc, char **argv)
 
     char *server_port = NULL;
     char *plugin_opts = NULL;
+    char *plugin_host = NULL;
     char *plugin_port = NULL;
     char tmp_port[8];
+    char *nameservers = NULL;
 
     int server_num = 0;
-    const char *server_host[MAX_REMOTE_NUM];
-
-    char *nameservers = NULL;
+    ss_addr_t server_addr[MAX_REMOTE_NUM];
+    memset(server_addr, 0, sizeof(ss_addr_t) * MAX_REMOTE_NUM);
 
     static struct option long_options[] = {
         { "fast-open",       no_argument,       NULL, GETOPT_VAL_FAST_OPEN   },
@@ -1676,11 +1681,12 @@ main(int argc, char **argv)
             break;
         case 's':
             if (server_num < MAX_REMOTE_NUM) {
-                server_host[server_num++] = optarg;
+                parse_addr(optarg, &server_addr[server_num++]);
             }
             break;
         case 'b':
-            local_addr = optarg;
+            if (parse_local_addr(&local_addr_v4, &local_addr_v6, optarg) == 0)
+                is_bind_local_addr = 1;
             break;
         case 'p':
             server_port = optarg;
@@ -1759,7 +1765,7 @@ main(int argc, char **argv)
         if (server_num == 0) {
             server_num = conf->remote_num;
             for (i = 0; i < server_num; i++)
-                server_host[i] = conf->remote_addr[i].host;
+                server_addr[i] = conf->remote_addr[i];
         }
         if (server_port == NULL) {
             server_port = conf->remote_port;
@@ -1803,8 +1809,13 @@ main(int argc, char **argv)
         if (fast_open == 0) {
             fast_open = conf->fast_open;
         }
-        if (local_addr == NULL) {
-            local_addr = conf->local_addr;
+        if (is_bind_local_addr == 0) {
+            if (parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr) == 0)
+                is_bind_local_addr = 1;
+            if (parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr_v4) == 0)
+                is_bind_local_addr = 1;
+            if (parse_local_addr(&local_addr_v4, &local_addr_v6, conf->local_addr_v6) == 0)
+                is_bind_local_addr = 1;
         }
 #ifdef HAVE_SETRLIMIT
         if (nofile == 0) {
@@ -1817,16 +1828,26 @@ main(int argc, char **argv)
         if (ipv6first == 0) {
             ipv6first = conf->ipv6_first;
         }
+        if (acl == 0 && conf->acl != NULL) {
+            LOGI("initializing acl...");
+            acl = !init_acl(conf->acl);
+        }
     }
 
     if (server_num == 0) {
-        server_host[server_num++] = "0.0.0.0";
+        server_addr[server_num++].host = "0.0.0.0";
     }
 
     if (server_num == 0 || server_port == NULL
         || (password == NULL && key == NULL)) {
         usage();
         exit(EXIT_FAILURE);
+    }
+
+    if (is_ipv6only(server_addr, server_num, ipv6first)) {
+        plugin_host = "::1";
+    } else {
+        plugin_host = "127.0.0.1";
     }
 
     remote_port = server_port;
@@ -1978,15 +1999,15 @@ main(int argc, char **argv)
         size_t buf_size  = 256 * server_num;
         char *server_str = ss_malloc(buf_size);
 
-        snprintf(server_str, buf_size, "%s", server_host[0]);
+        snprintf(server_str, buf_size, "%s", server_addr[0].host);
         len = strlen(server_str);
         for (int i = 1; i < server_num; i++) {
-            snprintf(server_str + len, buf_size - len, "|%s", server_host[i]);
+            snprintf(server_str + len, buf_size - len, "|%s", server_addr[i].host);
             len = strlen(server_str);
         }
 
         int err = start_plugin(plugin, plugin_opts, server_str,
-                               plugin_port, "127.0.0.1", server_port,
+                               plugin_port, plugin_host, server_port,
 #ifdef __MINGW32__
                                plugin_watcher.port,
 #endif
@@ -2004,16 +2025,17 @@ main(int argc, char **argv)
     if (mode != UDP_ONLY) {
         int num_listen_ctx = 0;
         for (int i = 0; i < server_num; i++) {
-            const char *host = server_host[i];
+            const char *host = server_addr[i].host;
+            const char *port = server_addr[i].port ? server_addr[i].port : server_port;
 
             if (plugin != NULL) {
-                host = "127.0.0.1";
+                host = plugin_host;
             }
 
             if (host && ss_is_ipv6addr(host))
-                LOGI("tcp server listening at [%s]:%s", host, server_port);
+                LOGI("tcp server listening at [%s]:%s", host, port);
             else
-                LOGI("tcp server listening at %s:%s", host ? host : "0.0.0.0", server_port);
+                LOGI("tcp server listening at %s:%s", host ? host : "0.0.0.0", port);
 
             // Bind to port
             int listenfd;
@@ -2052,8 +2074,8 @@ main(int argc, char **argv)
     if (mode != TCP_ONLY) {
         int num_listen_ctx = 0;
         for (int i = 0; i < server_num; i++) {
-            const char *host = server_host[i];
-            const char *port = server_port;
+            const char *host = server_addr[i].host;
+            const char *port = server_addr[i].port ? server_addr[i].port : server_port;
             if (plugin != NULL) {
                 port = plugin_port;
             }

@@ -1,7 +1,7 @@
 /*
  * common.h - Provide global definitions
  *
- * Copyright (C) 2013 - 2018, Max Lv <max.c.lv@gmail.com>
+ * Copyright (C) 2013 - 2019, Max Lv <max.c.lv@gmail.com>
  *
  * This file is part of the shadowsocks-libev.
  * shadowsocks-libev is free software; you can redistribute it and/or modify
@@ -69,7 +69,8 @@ enum {
     GETOPT_VAL_PASSWORD,
     GETOPT_VAL_KEY,
     GETOPT_VAL_MANAGER_ADDRESS,
-    GETOPT_VAL_EXECUTABLE
+    GETOPT_VAL_EXECUTABLE,
+    GETOPT_VAL_WORKDIR,
 };
 
 #endif // _COMMON_H
